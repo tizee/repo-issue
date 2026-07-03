@@ -15,11 +15,11 @@ related: []
 <!-- Brief description of the visual issue -->
 
 ## Component
-<!-- Tool Renderer / Panel / Chat / Status Line / Other -->
+<!-- e.g., Renderer / Panel / Status Line / Other -->
 
 ## Snapshot Test
-- Script: <!-- e.g., scripts/snapshots/tools/snapshot_bash.py -->
-- Test case: <!-- e.g., SNAPSHOT 3: Bash Error -->
+- Script: <!-- e.g., tests/snapshots/test_render.py -->
+- Test case: <!-- e.g., SNAPSHOT 3: Error state -->
 
 ## Visual Issue
 <!-- Describe what's wrong with the rendering -->
@@ -61,4 +61,4 @@ related: []
 
 ## Related Issues
 <!-- Cross-referenced issues and why they relate to this one -->
-<!-- Example: BUG-007 - Both involve input buffer handling, fix together -->
+<!-- Example: BUG-007 - Same rendering code path, fix together -->

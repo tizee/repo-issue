@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from issue_tracker.yaml_utils import dump_yaml_frontmatter, parse_yaml_frontmatter
+import pytest
+
+from issue_tracker.yaml_utils import (
+    dump_yaml_frontmatter,
+    parse_yaml_frontmatter,
+    set_frontmatter_field,
+)
 
 
 class TestParseYamlFrontmatter:
@@ -163,6 +169,93 @@ class TestDumpYamlFrontmatter:
         assert lines[0] == "id: BUG-001"
         assert lines[1] == "title: Fix"
         assert lines[2] == "status: open"
+
+
+class TestSetFrontmatterField:
+    """Tests for targeted frontmatter line edits on raw file content."""
+
+    CONTENT = """---
+id: BUG-001
+title: "Fix crash"
+status: open
+custom_field: something the naive parser may not understand
+---
+
+## Summary
+Body text.
+"""
+
+    def test_replaces_existing_field(self):
+        """Setting an existing key rewrites only that line."""
+        result = set_frontmatter_field(self.CONTENT, "status", "resolved")
+
+        assert "status: resolved" in result
+        assert "status: open" not in result
+
+    def test_adds_missing_field(self):
+        """Setting a new key appends it inside the frontmatter block."""
+        result = set_frontmatter_field(self.CONTENT, "resolved_date", "2026-07-03")
+
+        parsed = parse_yaml_frontmatter(result)
+        assert parsed["resolved_date"] == "2026-07-03"
+        # Field must live inside the frontmatter, not the body
+        fm_end = result.index("\n---", 3)
+        assert result.index("resolved_date") < fm_end
+
+    def test_removes_field_with_none(self):
+        """Setting a key to None removes its line."""
+        with_date = set_frontmatter_field(self.CONTENT, "resolved_date", "2026-07-03")
+        result = set_frontmatter_field(with_date, "resolved_date", None)
+
+        assert "resolved_date" not in result
+
+    def test_preserves_unknown_fields_and_body(self):
+        """Fields the parser does not model and the body survive untouched."""
+        result = set_frontmatter_field(self.CONTENT, "status", "in_progress")
+
+        assert "custom_field: something the naive parser may not understand" in result
+        assert "## Summary\nBody text." in result
+
+    def test_quotes_values_that_need_quoting(self):
+        """Values with special characters are written as valid quoted YAML."""
+        result = set_frontmatter_field(self.CONTENT, "title", 'He said "hi"')
+
+        parsed = parse_yaml_frontmatter(result)
+        assert parsed["title"] == 'He said "hi"'
+
+    def test_no_frontmatter_raises(self):
+        """Content without frontmatter cannot be edited."""
+        with pytest.raises(ValueError):
+            set_frontmatter_field("just a body", "status", "open")
+
+
+class TestQuoteEscapeRoundTrip:
+    """Quotes in values must survive any number of parse/dump cycles.
+
+    Regression: title escaping used to gain one backslash layer per
+    round-trip ('\"' -> '\\\"' -> ...), corrupting files on every update.
+    """
+
+    def test_parse_unescapes_double_quoted_value(self):
+        content = '---\ntitle: "He said \\"hi\\""\n---\n\nBody\n'
+        result = parse_yaml_frontmatter(content)
+
+        assert result["title"] == 'He said "hi"'
+
+    def test_dump_parse_round_trip_is_identity(self):
+        data = {"title": 'Title with "quotes" and \\ backslash'}
+
+        once = parse_yaml_frontmatter(dump_yaml_frontmatter(data) + "\nBody")
+        assert once["title"] == data["title"]
+
+    def test_repeated_round_trips_are_stable(self):
+        """N cycles of parse->dump must not change the serialized form."""
+        content = dump_yaml_frontmatter({"title": 'With "quotes"'}) + "\nBody"
+
+        for _ in range(3):
+            parsed = parse_yaml_frontmatter(content)
+            content = dump_yaml_frontmatter(parsed) + "\nBody"
+            assert parsed["title"] == 'With "quotes"'
 
 
 class TestRoundTrip:

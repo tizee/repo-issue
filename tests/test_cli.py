@@ -5,6 +5,8 @@ Tests all commands: list, create, update, show
 
 from __future__ import annotations
 
+import io
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -34,56 +36,61 @@ def temp_issues_dir():
     # Create bug report template
     (issues_dir / "templates" / "bug_report.md").write_text("""---
 id: {{ID}}
-title: {{TITLE}}
+title: "{{TITLE}}"
 created: {{DATE}}
 status: {{STATUS}}
 author: {{AUTHOR}}
 type: BUG
+priority: p2
 labels: ["bug", "triage"]
 related: []
 ---
 
 ## Summary
-{{DESCRIPTION}}
+<!-- Brief description of the bug -->
 
 ## Steps to Reproduce
-1.
+1. <!-- Step 1 -->
 
 ## Expected Behavior
+<!-- What should happen -->
 
 ## Actual Behavior
+<!-- What actually happens -->
 """)
 
     # Create feature template
     (issues_dir / "templates" / "feature_request.md").write_text("""---
 id: {{ID}}
-title: {{TITLE}}
+title: "{{TITLE}}"
 created: {{DATE}}
 status: {{STATUS}}
 author: {{AUTHOR}}
 type: FEAT
+priority: p2
 labels: ["enhancement", "triage"]
 related: []
 ---
 
 ## Summary
-{{DESCRIPTION}}
+<!-- Brief description of the feature -->
 """)
 
     # Create UI template
     (issues_dir / "templates" / "ui_regression.md").write_text("""---
 id: {{ID}}
-title: {{TITLE}}
+title: "{{TITLE}}"
 created: {{DATE}}
 status: {{STATUS}}
 author: {{AUTHOR}}
 type: UI
+priority: p2
 labels: ["ui-regression", "visual", "triage"]
 related: []
 ---
 
 ## Summary
-{{DESCRIPTION}}
+<!-- Brief description of the visual issue -->
 
 ## Component
 
@@ -91,9 +98,7 @@ related: []
 """)
 
     # Create counters file
-    (issues_dir / "counters.json").write_text(
-        '{"BUG": 0, "FEAT": 0, "UI": 0, "SAFE": 0, "DOCS": 0}'
-    )
+    (issues_dir / "counters.json").write_text('{"BUG": 0, "FEAT": 0, "UI": 0}')
 
     yield issues_dir
 
@@ -142,9 +147,7 @@ Add dark mode support.
 """)
 
     # Update counters
-    (temp_issues_dir / "counters.json").write_text(
-        '{"BUG": 1, "FEAT": 1, "UI": 0, "SAFE": 0, "DOCS": 0}'
-    )
+    (temp_issues_dir / "counters.json").write_text('{"BUG": 1, "FEAT": 1, "UI": 0}')
 
     return temp_issues_dir
 
@@ -228,6 +231,26 @@ class TestParseArgs:
         with pytest.raises(SystemExit) as exc_info:
             parse_args(["create", "--help"])
         assert exc_info.value.code == 0
+
+    def test_version_flag(self, capsys):
+        """issue --version reports the tool version and exits 0."""
+        with pytest.raises(SystemExit) as exc_info:
+            parse_args(["--version"])
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert any(ch.isdigit() for ch in captured.out)
+
+    def test_description_sources_are_mutually_exclusive(self, capsys):
+        """-d and --body-file cannot be combined."""
+        with pytest.raises(SystemExit) as exc_info:
+            parse_args(["create", "bug", "Title", "-d", "text", "--body-file", "b.md"])
+        assert exc_info.value.code == 2
+
+    def test_template_command(self):
+        """Test parsing template command."""
+        args = parse_args(["template", "bug"])
+        assert args.command == "template"
+        assert args.type == "bug"
 
 
 class TestListCommand:
@@ -348,6 +371,102 @@ class TestCreateCommand:
             # argparse returns 2 for invalid choices
             assert exc_info.value.code == 2
 
+    def test_create_description_from_stdin(self, temp_issues_dir, capsys):
+        """-d - reads the description from stdin, avoiding shell quoting."""
+        long_text = 'line1\nline2 with "quotes" and `backticks`\nline3'
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch("sys.argv", ["issue", "create", "bug", "Stdin bug", "-d", "-"]),
+            patch("sys.stdin", io.StringIO(long_text)),
+        ):
+            main()
+
+        content = (temp_issues_dir / "active" / "BUG-001.md").read_text()
+        assert 'line2 with "quotes" and `backticks`' in content
+
+    def test_create_description_from_file(self, temp_issues_dir, capsys):
+        """--description-file loads the description from a file."""
+        desc_file = temp_issues_dir.parent / "desc.md"
+        desc_file.write_text("Description loaded from file.")
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch(
+                "sys.argv",
+                [
+                    "issue",
+                    "create",
+                    "bug",
+                    "File bug",
+                    "--description-file",
+                    str(desc_file),
+                ],
+            ),
+        ):
+            main()
+
+        content = (temp_issues_dir / "active" / "BUG-001.md").read_text()
+        assert "Description loaded from file." in content
+
+    def test_create_body_from_file(self, temp_issues_dir, capsys):
+        """--body-file replaces the whole body; frontmatter stays tool-owned."""
+        body_file = temp_issues_dir.parent / "body.md"
+        body_file.write_text(
+            "## Summary\nFull custom body.\n\n## Root Cause\nDetails here.\n"
+        )
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch(
+                "sys.argv",
+                [
+                    "issue",
+                    "create",
+                    "bug",
+                    "Body bug",
+                    "--body-file",
+                    str(body_file),
+                ],
+            ),
+        ):
+            main()
+
+        content = (temp_issues_dir / "active" / "BUG-001.md").read_text()
+        assert "id: BUG-001" in content
+        assert "## Root Cause" in content
+        assert "<!--" not in content, "template skeleton must not leak into body"
+
+    def test_create_body_from_stdin(self, temp_issues_dir, capsys):
+        """--body-file - reads the body from stdin for piping workflows."""
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch(
+                "sys.argv",
+                ["issue", "create", "feat", "Piped feat", "--body-file", "-"],
+            ),
+            patch("sys.stdin", io.StringIO("## Summary\nPiped body.\n")),
+        ):
+            main()
+
+        content = (temp_issues_dir / "active" / "FEAT-001.md").read_text()
+        assert "Piped body." in content
+
+    def test_create_json_output(self, temp_issues_dir, capsys):
+        """create --json emits machine-readable result on stdout."""
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch(
+                "sys.argv",
+                ["issue", "create", "bug", "JSON bug", "-p", "p1", "--json"],
+            ),
+        ):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["id"] == "BUG-001"
+        assert data["status"] == "open"
+        assert data["priority"] == "p1"
+        assert data["file"].endswith("BUG-001.md")
+
 
 class TestUpdateCommand:
     """Tests for update command."""
@@ -410,6 +529,22 @@ class TestUpdateCommand:
                 main()
             assert exc_info.value.code == 2  # argparse error
 
+    def test_update_json_output(self, sample_active_issues, capsys):
+        """update --json emits machine-readable result on stdout."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.argv", ["issue", "update", "BUG-001", "resolved", "--json"]),
+        ):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["id"] == "BUG-001"
+        assert data["status"] == "resolved"
+        assert data["file"].endswith("BUG-001.md")
+
 
 class TestShowCommand:
     """Tests for show command."""
@@ -439,6 +574,54 @@ class TestShowCommand:
         ):
             result = main()
             assert result == 1
+
+    def test_show_json_includes_body(self, sample_active_issues, capsys):
+        """show --json returns the complete issue: frontmatter plus body."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.argv", ["issue", "show", "BUG-001", "--json"]),
+        ):
+            main()
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["id"] == "BUG-001"
+        assert "App crashes on startup." in data["body"]
+
+
+class TestTemplateCommand:
+    """Tests for the template command (agent fills it, pipes to --body-file)."""
+
+    def test_template_prints_body_skeleton(self, temp_issues_dir, capsys):
+        """issue template <type> prints the template body without frontmatter."""
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch("sys.argv", ["issue", "template", "bug"]),
+        ):
+            result = main()
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "## Summary" in captured.out
+        assert "## Steps to Reproduce" in captured.out
+        # Frontmatter is tool-owned: must not be part of the fillable skeleton
+        assert "id: {{ID}}" not in captured.out
+        assert not captured.out.startswith("---")
+
+    def test_template_missing_file(self, temp_issues_dir, capsys):
+        """Missing per-repo template file is a clear error, not a crash."""
+        (temp_issues_dir / "templates" / "bug_report.md").unlink()
+        with (
+            patch("issue_tracker.cli.find_issues_dir", return_value=temp_issues_dir),
+            patch("sys.argv", ["issue", "template", "bug"]),
+        ):
+            result = main()
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "template" in captured.err.lower()
 
 
 class TestCommandDispatch:
@@ -489,11 +672,3 @@ class TestCommandDispatch:
         with patch("issue_tracker.cli.cmd_show") as mock_show:
             dispatch_command(args, Path("/tmp"))
             mock_show.assert_called_once()
-
-    def test_dispatch_unknown_command(self):
-        """Test dispatch with unknown command shows error."""
-        args = MagicMock()
-        args.command = "unknown"
-
-        result = dispatch_command(args, Path("/tmp"))
-        assert result == 1

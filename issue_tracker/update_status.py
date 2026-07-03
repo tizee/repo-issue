@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from .yaml_utils import dump_yaml_frontmatter, split_frontmatter
+from .yaml_utils import parse_yaml_frontmatter, set_frontmatter_field
 
 VALID_STATUSES = {"open", "in_progress", "resolved", "cancelled"}
 
@@ -29,6 +29,9 @@ def update_issue_status(
     new_status: str,
 ) -> Path:
     """Update an issue's status and move between directories if needed.
+
+    Edits only the status/resolved_date frontmatter lines; every other
+    field and the body pass through untouched.
 
     Raises:
         IssueUpdateError: If status is invalid, issue not found, or parse fails.
@@ -56,36 +59,27 @@ def update_issue_status(
             f"  Hint: use 'issue list' to see active issues"
         )
 
-    # Read and parse
     content = source_path.read_text()
-    frontmatter, body = split_frontmatter(content)
-
+    frontmatter = parse_yaml_frontmatter(content)
     if frontmatter is None:
         raise IssueUpdateError(f"Failed to parse frontmatter in {source_path}")
 
-    if not frontmatter:
-        frontmatter = {
-            "id": issue_id,
-            "title": "",
-            "created": datetime.now().strftime("%Y-%m-%d"),
-            "status": new_status,
-            "author": "unknown",
-        }
-
-    # Update status
     old_status = frontmatter.get("status", "unknown")
-    frontmatter["status"] = new_status
+
+    new_content = set_frontmatter_field(content, "status", new_status)
 
     # Add resolved_date if transitioning to resolved/cancelled
     if new_status in ("resolved", "cancelled") and old_status not in (
         "resolved",
         "cancelled",
     ):
-        frontmatter["resolved_date"] = datetime.now().strftime("%Y-%m-%d")
+        new_content = set_frontmatter_field(
+            new_content, "resolved_date", datetime.now().strftime("%Y-%m-%d")
+        )
 
     # Remove resolved_date if transitioning back to open/in_progress
-    if new_status in ("open", "in_progress") and "resolved_date" in frontmatter:
-        del frontmatter["resolved_date"]
+    if new_status in ("open", "in_progress"):
+        new_content = set_frontmatter_field(new_content, "resolved_date", None)
 
     # Determine target path
     if new_status in ("resolved", "cancelled"):
@@ -94,9 +88,6 @@ def update_issue_status(
     else:
         active_dir.mkdir(parents=True, exist_ok=True)
         target_path = active_path
-
-    # Write updated content using unified yaml_utils
-    new_content = dump_yaml_frontmatter(frontmatter) + body
 
     # If moving directories, remove from source
     if source_path != target_path:

@@ -19,7 +19,7 @@ from .discovery import ISSUES_DIR_NAME
 
 _BUNDLED_TEMPLATES = Path(__file__).parent / "templates"
 
-DEFAULT_COUNTERS = {"BUG": 0, "FEAT": 0, "SAFE": 0, "UI": 0, "DOCS": 0}
+DEFAULT_COUNTERS = {"BUG": 0, "FEAT": 0, "UI": 0}
 
 
 class IssuesInitError(Exception):

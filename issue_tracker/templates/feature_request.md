@@ -49,4 +49,4 @@ related: []
 
 ## Related Issues
 <!-- Cross-referenced issues and why they relate to this one -->
-<!-- Example: BUG-007 - Solving both together avoids throwaway work on buffer handling -->
+<!-- Example: BUG-007 - Solving both together avoids throwaway work -->

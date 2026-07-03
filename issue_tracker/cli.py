@@ -4,8 +4,9 @@ Usage:
     issue init
     issue list [filters...] [--resolved] [--all] [--json] [--labels]
     issue create <type> <title> [options]
-    issue update <issue-id> <status>
+    issue update <issue-id> <status> [--json]
     issue show <issue-id> [--json]
+    issue template <type>
     issue search <query>
     issue stats
     issue reconcile
@@ -16,6 +17,7 @@ Commands:
     create      Create a new issue from template
     update      Update issue status and manage lifecycle
     show        Display full issue details
+    template    Print a template body skeleton for filling in
     search      Full-text search across all issues
     stats       Show summary statistics
     reconcile   Check consistency between files and counters
@@ -34,9 +36,13 @@ Examples:
     issue list --labels                 # List all labels
     issue create bug "Fix crash"        # Create bug report
     issue create feat "New feature" -d "Description" -p p1
+    issue create bug "Crash" -d -       # Read description from stdin
+    issue create bug "Crash" --description-file notes.md
+    issue template bug > body.md        # Get skeleton, fill it in, then:
+    issue create bug "Crash" --body-file body.md
     issue update BUG-001 resolved       # Mark as resolved
     issue show FEAT-030                 # Show issue details
-    issue show FEAT-030 --json          # Show as JSON (frontmatter only)
+    issue show FEAT-030 --json          # Show as JSON (frontmatter + body)
     issue search "null pointer"         # Full-text search
     issue stats                         # Summary counts
     issue reconcile                     # Check file/counter consistency
@@ -45,6 +51,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import re
@@ -57,7 +64,7 @@ from .create_issue import IssueCreationError, create_issue
 from .discovery import IssuesDirNotFoundError, find_issues_dir
 from .init import IssuesInitError, init_issues_dir
 from .update_status import IssueUpdateError, update_issue_status
-from .yaml_utils import parse_yaml_frontmatter
+from .yaml_utils import parse_yaml_frontmatter, split_frontmatter_raw
 
 
 def should_disable_color() -> bool:
@@ -73,6 +80,22 @@ def should_disable_color() -> bool:
     if os.environ.get("NO_COLOR") is not None:
         return True
     return not sys.stdout.isatty()
+
+
+# Maps CLI type shorthand to template name
+TYPE_TEMPLATE_MAP = {
+    "bug": "bug_report",
+    "feat": "feature_request",
+    "ui": "ui_regression",
+}
+
+
+def _tool_version() -> str:
+    """Return the installed distribution version."""
+    try:
+        return importlib.metadata.version("repo-issue")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown (package not installed)"
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +116,7 @@ Commands:
   create      Create a new issue from template
   update      Update issue status (open/in_progress/resolved/cancelled)
   show        Display full issue content
+  template    Print a template body skeleton (fill in, pass to create --body-file)
   search      Full-text search across all issues
   stats       Summary statistics (counts by type, status, priority)
   reconcile   Verify file/counter consistency
@@ -100,8 +124,16 @@ Commands:
 JSON output (--json):
   list        Array of issue objects
   list --labels  Object with label names as keys, counts as values
+  create      Object with id, type, status, priority, file
+  update      Object with id, status, file
+  show        Object with frontmatter fields plus body
   search      Array of matching issue objects
   stats       Object with total, active, resolved, by_type, by_status, by_priority
+
+Exit codes:
+  0  success
+  1  operation error (not found, no issues dir, consistency problems)
+  2  usage error (invalid arguments)
 
 Filters (for 'list' command):
   bug, feat, ui                 Type shorthand
@@ -118,6 +150,10 @@ Examples:
   issue list --all --json             All issues as JSON
   issue list priority:p0              P0 issues only
   issue create bug "Fix crash" -p p0  Create P0 bug
+  issue create bug "Crash" -d -       Description from stdin (no shell quoting)
+  issue create bug "Crash" --description-file notes.md
+  issue template bug > body.md        Print skeleton, fill it, then:
+  issue create bug "Crash" --body-file body.md --json
   issue update BUG-001 resolved       Resolve issue
   issue search "null pointer"         Search all issues
   issue search "crash" --json         Search results as JSON
@@ -125,6 +161,12 @@ Examples:
   issue stats --json                  Stats as JSON
   issue reconcile                     Check consistency
 """,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_tool_version()}",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -174,6 +216,22 @@ Examples:
         "create",
         help="Create a new issue from template",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Content channels (mutually exclusive):
+  -d TEXT / -d -           Short summary (- reads stdin); ticket body becomes
+                           a single '## Summary' section
+  --description-file PATH  Same as -d, loaded from a file (- reads stdin)
+  --body-file PATH         Full markdown body replacing the template body
+                           (- reads stdin); must not contain frontmatter
+  (none)                   Full template skeleton kept for later editing
+
+Examples:
+  issue create bug "Fix crash"
+  issue create feat "Dark mode" -d "Add a dark color scheme" -p p1
+  issue create bug "Crash on save" --description-file notes.md
+  issue template bug > body.md   # fill it in, then:
+  issue create bug "Crash on save" --body-file body.md --json
+""",
     )
     create_parser.add_argument(
         "type",
@@ -184,11 +242,24 @@ Examples:
         "title",
         help="Issue title",
     )
-    create_parser.add_argument(
+    content_group = create_parser.add_mutually_exclusive_group()
+    content_group.add_argument(
         "--description",
         "-d",
         default=None,
-        help="Optional description/summary",
+        help="Short summary text; use '-' to read from stdin",
+    )
+    content_group.add_argument(
+        "--description-file",
+        default=None,
+        metavar="PATH",
+        help="Read the summary from a file; use '-' to read from stdin",
+    )
+    content_group.add_argument(
+        "--body-file",
+        default=None,
+        metavar="PATH",
+        help="Read the full issue body from a file; use '-' to read from stdin",
     )
     create_parser.add_argument(
         "--author",
@@ -202,6 +273,12 @@ Examples:
         default=None,
         choices=["p0", "p1", "p2", "p3"],
         help="Priority (p0=critical, p1=high, p2=medium, p3=low)",
+    )
+    create_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output creation result as JSON",
     )
 
     # --- update ---
@@ -219,6 +296,12 @@ Examples:
         choices=["open", "in_progress", "resolved", "cancelled"],
         help="New status for the issue",
     )
+    update_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output update result as JSON",
+    )
 
     # --- show ---
     show_parser = subparsers.add_parser(
@@ -234,7 +317,26 @@ Examples:
         "--json",
         action="store_true",
         dest="json_output",
-        help="Output frontmatter as JSON",
+        help="Output frontmatter and body as JSON",
+    )
+
+    # --- template ---
+    template_parser = subparsers.add_parser(
+        "template",
+        help="Print a template body skeleton for filling in",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Prints the body sections of the repo's issue template (frontmatter is
+managed by the tool and omitted). Typical agent workflow:
+
+  issue template bug > body.md   # fill in the sections
+  issue create bug "Crash on save" --body-file body.md
+""",
+    )
+    template_parser.add_argument(
+        "type",
+        choices=["bug", "feat", "ui"],
+        help="Issue type (bug, feat, or ui)",
     )
 
     # --- search ---
@@ -293,7 +395,12 @@ Examples:
 
 
 def _load_issues_from_dir(directory: Path) -> list[dict[str, Any]]:
-    """Load issues from a single directory."""
+    """Load issues from a single directory.
+
+    Internal keys (stripped from JSON output):
+        _file: source file path
+        _content: full file text (used by full-text search)
+    """
     if not directory.exists():
         return []
 
@@ -308,6 +415,7 @@ def _load_issues_from_dir(directory: Path) -> list[dict[str, Any]]:
                 if "blocked_by" not in data or not isinstance(data["blocked_by"], list):
                     data["blocked_by"] = []
                 data["_file"] = str(file_path)
+                data["_content"] = content
                 issues.append(data)
         except (OSError, UnicodeDecodeError):
             continue
@@ -571,56 +679,105 @@ def cmd_list(args: argparse.Namespace, issues_dir: Path) -> int:
 
 def cmd_create(args: argparse.Namespace, issues_dir: Path) -> int:
     """Handle create command."""
-    template_map = {
-        "bug": "bug_report",
-        "feat": "feature_request",
-        "ui": "ui_regression",
-    }
-
-    template_name = template_map[args.type]
+    template_name = TYPE_TEMPLATE_MAP[args.type]
 
     try:
+        description = None
+        body = None
+        if args.description is not None:
+            description = _read_text_arg(args.description)
+        elif args.description_file is not None:
+            description = _read_file_arg(args.description_file)
+        elif args.body_file is not None:
+            body = _read_file_arg(args.body_file)
+
         issue_path = create_issue(
             template_name=template_name,
             title=args.title,
-            description=args.description,
+            description=description,
+            body=body,
             author=args.author,
+            priority=args.priority,
             issues_dir=issues_dir,
         )
 
-        # If priority was specified, update the frontmatter
-        if getattr(args, "priority", None):
-            _set_priority_in_file(issue_path, args.priority)
-
         issue_id = issue_path.stem
-        print(f"Created: {issue_id}")
-        print(f"Type: {args.type}")
-        print(f"File: {issue_path}")
-        if getattr(args, "priority", None):
-            print(f"Priority: {args.priority}")
+        if args.json_output:
+            print(
+                json.dumps(
+                    {
+                        "id": issue_id,
+                        "type": args.type,
+                        "status": "open",
+                        "priority": args.priority,
+                        "file": str(issue_path),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"Created: {issue_id}")
+            print(f"Type: {args.type}")
+            print(f"File: {issue_path}")
+            if args.priority:
+                print(f"Priority: {args.priority}")
         return 0
-    except IssueCreationError as e:
+    except (IssueCreationError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
 
-def _set_priority_in_file(file_path: Path, priority: str) -> None:
-    """Update priority field in an issue file's frontmatter."""
-    from .yaml_utils import dump_yaml_frontmatter, split_frontmatter
+def _read_text_arg(value: str) -> str:
+    """Resolve a text argument; '-' means read from stdin."""
+    if value == "-":
+        return sys.stdin.read()
+    return value
 
-    content = file_path.read_text()
-    frontmatter, body = split_frontmatter(content)
-    if frontmatter is not None:
-        frontmatter["priority"] = priority
-        file_path.write_text(dump_yaml_frontmatter(frontmatter) + body)
+
+def _read_file_arg(path: str) -> str:
+    """Read text from a file path; '-' means read from stdin."""
+    if path == "-":
+        return sys.stdin.read()
+    return Path(path).read_text()
+
+
+def cmd_template(args: argparse.Namespace, issues_dir: Path) -> int:
+    """Handle template command - print the body skeleton for filling in."""
+    template_name = TYPE_TEMPLATE_MAP[args.type]
+    template_path = issues_dir / "templates" / f"{template_name}.md"
+
+    if not template_path.exists():
+        print(
+            f"Error: Template not found: {template_path}\n"
+            f"  Hint: run 'issue init' to restore bundled templates",
+            file=sys.stderr,
+        )
+        return 1
+
+    content = template_path.read_text()
+    _, body = split_frontmatter_raw(content)
+    print(body.strip())
+    return 0
 
 
 def cmd_update(args: argparse.Namespace, issues_dir: Path) -> int:
     """Handle update command."""
     try:
         target_path = update_issue_status(issues_dir, args.issue_id, args.status)
-        print(f"Updated: {args.issue_id} -> {args.status}")
-        print(f"File: {target_path}")
+        if getattr(args, "json_output", False):
+            print(
+                json.dumps(
+                    {
+                        "id": args.issue_id,
+                        "status": args.status,
+                        "file": str(target_path),
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"Updated: {args.issue_id} -> {args.status}")
+            print(f"File: {target_path}")
         return 0
     except IssueUpdateError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -649,11 +806,10 @@ def cmd_show(args: argparse.Namespace, issues_dir: Path) -> int:
         content = issue_file.read_text()
 
         if getattr(args, "json_output", False):
-            data = parse_yaml_frontmatter(content)
-            if data:
-                print(json.dumps(data, indent=2, ensure_ascii=False))
-            else:
-                print("{}")
+            data = parse_yaml_frontmatter(content) or {}
+            _, body = split_frontmatter_raw(content)
+            data["body"] = body
+            print(json.dumps(data, indent=2, ensure_ascii=False))
         else:
             print(content)
         return 0
@@ -667,31 +823,9 @@ def cmd_search(args: argparse.Namespace, issues_dir: Path) -> int:
     include_resolved = getattr(args, "resolved", False) or getattr(args, "all", False)
     query_lower = args.query.lower()
 
-    results: list[dict[str, Any]] = []
-
-    dirs = [issues_dir / "active"]
-    if include_resolved:
-        dirs.append(issues_dir / "resolved")
-
-    for directory in dirs:
-        if not directory.exists():
-            continue
-        for file_path in directory.glob("*.md"):
-            try:
-                content = file_path.read_text()
-                if query_lower in content.lower():
-                    data = parse_yaml_frontmatter(content)
-                    if data and "id" in data:
-                        if "labels" not in data or not isinstance(data["labels"], list):
-                            data["labels"] = []
-                        if "blocked_by" not in data or not isinstance(
-                            data["blocked_by"], list
-                        ):
-                            data["blocked_by"] = []
-                        data["_file"] = str(file_path)
-                        results.append(data)
-            except (OSError, UnicodeDecodeError):
-                continue
+    issues = load_issues(issues_dir, include_resolved=include_resolved)
+    results = [i for i in issues if query_lower in i["_content"].lower()]
+    results.sort(key=_issue_sort_key)
 
     results.sort(key=_issue_sort_key)
 
@@ -888,21 +1022,14 @@ def dispatch_command(args: argparse.Namespace, issues_dir: Path) -> int:
         "create": cmd_create,
         "update": cmd_update,
         "show": cmd_show,
+        "template": cmd_template,
         "search": cmd_search,
         "stats": cmd_stats,
         "reconcile": cmd_reconcile,
     }
 
-    handler = commands.get(args.command)
-    if handler:
-        return handler(args, issues_dir)
-
-    print(f"Error: Unknown command '{args.command}'", file=sys.stderr)
-    print(
-        "  Available: init, list, create, update, show, search, stats, reconcile",
-        file=sys.stderr,
-    )
-    return 1
+    # argparse subparsers guarantee args.command is a known command
+    return commands[args.command](args, issues_dir)
 
 
 def main() -> int:
@@ -913,7 +1040,8 @@ def main() -> int:
         print(
             "Error: No command specified.\n"
             "  Usage: issue <command> [args...]\n"
-            "  Commands: init, list, create, update, show, search, stats, reconcile\n"
+            "  Commands: init, list, create, update, show, template, search, "
+            "stats, reconcile\n"
             "  Run 'issue --help' for full usage.",
             file=sys.stderr,
         )

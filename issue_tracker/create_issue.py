@@ -4,7 +4,6 @@ Templates:
     bug_report          - General bug report
     feature_request     - Feature request
     ui_regression       - Visual/UI rendering issue
-    multi_agent_safety  - Multi-agent safety concern
 """
 
 from __future__ import annotations
@@ -16,11 +15,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from .yaml_utils import set_frontmatter_field, split_frontmatter_raw
+
 TEMPLATE_PREFIXES = {
     "bug_report": "BUG",
     "feature_request": "FEAT",
     "ui_regression": "UI",
-    "multi_agent_safety": "SAFE",
 }
 
 
@@ -87,7 +87,7 @@ def get_next_id(issues_dir: Path, prefix: str) -> str:
 
 def _init_counters(counters_path: Path) -> None:
     """Initialize counters.json with default values if it doesn't exist."""
-    defaults = {"BUG": 0, "FEAT": 0, "SAFE": 0, "UI": 0, "DOCS": 0}
+    defaults = dict.fromkeys(sorted(TEMPLATE_PREFIXES.values()), 0)
     counters_path.write_text(json.dumps(defaults, indent=2))
 
 
@@ -119,23 +119,48 @@ def create_issue(
     title: str,
     issues_dir: Path,
     description: str | None = None,
+    body: str | None = None,
     author: str = "agent",
+    priority: str | None = None,
 ) -> Path:
     """Create a new issue from template.
 
+    Content channels (mutually exclusive):
+        description: Short summary. The ticket body becomes a single
+            '## Summary' section - no unfilled template skeleton is kept.
+        body: Full markdown body replacing the template body entirely.
+            Frontmatter stays tool-owned; a body carrying its own
+            frontmatter is rejected.
+        neither: The full template skeleton is kept as a fill-in prompt.
+
     Args:
         template_name: Template to use (bug_report, feature_request, etc.)
-        title: Issue title
+        title: Issue title (single line)
         issues_dir: Issues data directory (see discovery.find_issues_dir)
         description: Optional description/summary
+        body: Optional full body content
         author: Author name (default: agent)
+        priority: Optional priority (p0-p3), written into frontmatter
 
     Returns:
         Path to created issue file
 
     Raises:
-        IssueCreationError: If template is unknown or template file not found
+        IssueCreationError: On unknown template, missing template file,
+            conflicting content channels, or malformed title/body.
     """
+    if description is not None and body is not None:
+        raise IssueCreationError(
+            "description and body are mutually exclusive - provide one"
+        )
+    if "\n" in title:
+        raise IssueCreationError("title must be a single line")
+    if body is not None and body.lstrip().startswith("---"):
+        raise IssueCreationError(
+            "body must not contain frontmatter (--- block); "
+            "id/status/dates are managed by the tool"
+        )
+
     templates_dir = issues_dir / "templates"
     active_dir = issues_dir / "active"
 
@@ -156,28 +181,33 @@ def create_issue(
     template_content = template_path.read_text()
 
     # Substitute variables in template
-    escaped_title = title.replace('"', '\\"')
     content = template_content.replace("{{ID}}", issue_id)
-    content = content.replace("{{TITLE}}", escaped_title)
+    content = content.replace("{{TITLE}}", title)
     content = content.replace("{{DATE}}", datetime.now().strftime("%Y-%m-%d"))
     content = content.replace("{{AUTHOR}}", author)
     content = content.replace("{{STATUS}}", "open")
 
-    # Add user description if provided (insert after Summary heading)
-    if description:
-        summary_marker = "## Summary\n"
-        if summary_marker in content:
-            # Find position after Summary heading
-            pos = content.find(summary_marker) + len(summary_marker)
-            # Check if there's a comment placeholder
-            if content[pos:].startswith("<!--"):
-                end_comment = content.find("-->", pos)
-                if end_comment != -1:
-                    # Replace the placeholder comment with description
-                    content = content[:pos] + description + content[end_comment + 3 :]
-            else:
-                # Insert description after Summary heading
-                content = content[:pos] + description + "\n\n" + content[pos:]
+    # Normalize the title line: proper YAML quoting/escaping regardless of
+    # how the template writes it (quoted or bare placeholder).
+    try:
+        content = set_frontmatter_field(content, "title", title)
+        if priority:
+            content = set_frontmatter_field(content, "priority", priority)
+    except ValueError as e:
+        raise IssueCreationError(f"Template {template_path} is malformed: {e}") from e
+
+    frontmatter_block, _template_body = split_frontmatter_raw(content)
+    if frontmatter_block is None:
+        raise IssueCreationError(
+            f"Template {template_path} has no YAML frontmatter block"
+        )
+
+    if body is not None:
+        content = frontmatter_block + "\n" + body.strip() + "\n"
+    elif description is not None:
+        # Summary-only body: no dead placeholder skeleton. Agents that want
+        # the full section structure use 'issue template' + body instead.
+        content = frontmatter_block + "\n## Summary\n\n" + description.strip() + "\n"
 
     # Write issue file
     active_dir.mkdir(parents=True, exist_ok=True)

@@ -35,14 +35,14 @@ related: []
 <!-- Why does this need to be fixed now vs later? What depends on this? -->
 
 ## Visual Evidence
-<!-- If applicable, describe what was seen in snapshot tests -->
-- Snapshot script: <!-- e.g., scripts/snapshots/tools/snapshot_write.py -->
+<!-- If applicable: screenshots, snapshot test output, or terminal captures -->
+- Test/script: <!-- e.g., tests/snapshots/test_render.py -->
 - Expected rendering: <!-- Description of correct visual output -->
 - Actual rendering: <!-- Description of incorrect visual output -->
 
 ## Environment
-- Component: <!-- e.g., Tool Renderer, Panel, Chat Component -->
-- File: <!-- e.g., llms/app/agent_ui/renderers/write.py -->
+- Component: <!-- e.g., CLI, Renderer, API layer -->
+- File: <!-- e.g., src/module/file.py -->
 
 ## Root Cause Analysis (if known)
 <!-- Optional: preliminary analysis of the cause -->
@@ -52,4 +52,4 @@ related: []
 
 ## Related Issues
 <!-- Cross-referenced issues and why they relate to this one -->
-<!-- Example: FEAT-006 - Both require bypassing InputBuffer for paste events -->
+<!-- Example: FEAT-006 - Shares the same root cause in input handling -->

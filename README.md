@@ -41,10 +41,35 @@ issue list --all --json               # All issues as JSON
 issue create bug "Fix crash" -p p0    # Create issue
 issue update BUG-001 resolved         # Update status (moves file)
 issue show FEAT-030                   # Show issue details
+issue show FEAT-030 --json            # Frontmatter + body as JSON
 issue search "null pointer" --all     # Full-text search
 issue stats                           # Summary counts
 issue reconcile                       # Check file/counter consistency
 ```
+
+## Writing issue content
+
+Three content channels for `create`, designed so that long or structured
+text never has to be escaped through the shell:
+
+```bash
+# Quick capture: short summary inline (body becomes a single Summary section)
+issue create bug "Fix crash" -d "Crash when saving with unicode filenames"
+
+# Long description: from a file or stdin -- no shell quoting pitfalls
+issue create bug "Fix crash" --description-file notes.md
+git log -1 --format=%B | issue create bug "Fix crash" -d -
+
+# Full structured ticket: get the template skeleton, fill it, pass it back
+issue template bug > body.md          # print fillable body sections
+issue create bug "Fix crash" --body-file body.md --json
+```
+
+Frontmatter (id, dates, status, type) is always tool-owned; a body that
+carries its own `---` frontmatter block is rejected.
+
+`--json` on `create` and `update` emits machine-readable results
+(`{"id": ..., "status": ..., "file": ...}`) for scripted workflows.
 
 ## Issue lifecycle
 

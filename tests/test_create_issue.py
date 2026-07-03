@@ -10,7 +10,13 @@ from unittest.mock import patch
 
 import pytest
 
-from issue_tracker.create_issue import _init_counters, create_issue, get_next_id
+from issue_tracker.create_issue import (
+    IssueCreationError,
+    _init_counters,
+    create_issue,
+    get_next_id,
+)
+from issue_tracker.yaml_utils import parse_yaml_frontmatter
 
 
 @pytest.fixture
@@ -27,16 +33,19 @@ def temp_issues_dir():
     bug_template = issues_dir / "templates" / "bug_report.md"
     bug_template.write_text("""---
 id: {{ID}}
-title: {{TITLE}}
+title: "{{TITLE}}"
 created: {{DATE}}
 status: {{STATUS}}
 author: {{AUTHOR}}
 type: BUG
+priority: p2
 ---
 
 ## Summary
+<!-- Brief description of the bug -->
 
 ## Steps to Reproduce
+1. <!-- Step 1 -->
 """)
 
     # Create feature template
@@ -84,7 +93,7 @@ class TestInitCounters:
 
         assert counters_path.exists()
         data = json.loads(counters_path.read_text())
-        assert data == {"BUG": 0, "FEAT": 0, "SAFE": 0, "UI": 0, "DOCS": 0}
+        assert data == {"BUG": 0, "FEAT": 0, "UI": 0}
 
 
 class TestGetNextId:
@@ -101,9 +110,7 @@ class TestGetNextId:
     def test_sequential_ids(self, temp_issues_dir):
         """Test that IDs are sequential."""
         counters_path = temp_issues_dir / "counters.json"
-        counters_path.write_text(
-            json.dumps({"BUG": 3, "FEAT": 0, "UI": 0, "SAFE": 0, "DOCS": 0})
-        )
+        counters_path.write_text(json.dumps({"BUG": 3, "FEAT": 0, "UI": 0}))
 
         issue_id = get_next_id(temp_issues_dir, "BUG")
 
@@ -112,9 +119,7 @@ class TestGetNextId:
     def test_independent_prefixes(self, temp_issues_dir):
         """Test that different prefixes have independent counters."""
         counters_path = temp_issues_dir / "counters.json"
-        counters_path.write_text(
-            json.dumps({"BUG": 5, "FEAT": 2, "UI": 0, "SAFE": 0, "DOCS": 0})
-        )
+        counters_path.write_text(json.dumps({"BUG": 5, "FEAT": 2, "UI": 0}))
 
         bug_id = get_next_id(temp_issues_dir, "BUG")
         feat_id = get_next_id(temp_issues_dir, "FEAT")
@@ -187,3 +192,106 @@ class TestCreateIssue:
         assert issue_path.exists()
         content = issue_path.read_text()
         assert "title: Bug without description" in content
+
+    def test_bare_create_keeps_full_template(self, temp_issues_dir):
+        """Without description or body, the template skeleton is preserved
+        as a fill-in prompt for whoever edits the ticket later."""
+        issue_path = create_issue(
+            template_name="bug_report",
+            title="Skeleton bug",
+            issues_dir=temp_issues_dir,
+        )
+
+        content = issue_path.read_text()
+        assert "## Steps to Reproduce" in content
+
+    def test_description_produces_summary_only_body(self, temp_issues_dir):
+        """A described ticket carries no unfilled template skeleton.
+
+        Regression: tickets used to keep dozens of placeholder comment lines
+        (<!-- Step 1 --> etc.) that nobody ever filled in — pure byte waste.
+        """
+        issue_path = create_issue(
+            template_name="bug_report",
+            title="Described bug",
+            issues_dir=temp_issues_dir,
+            description="Crash when saving.\n\nStack trace attached.",
+        )
+
+        content = issue_path.read_text()
+        assert "## Summary" in content
+        assert "Crash when saving." in content
+        assert "<!--" not in content
+        assert "## Steps to Reproduce" not in content
+
+    def test_priority_written_into_frontmatter(self, temp_issues_dir):
+        """Priority given at creation lands in frontmatter."""
+        issue_path = create_issue(
+            template_name="bug_report",
+            title="Urgent bug",
+            issues_dir=temp_issues_dir,
+            priority="p0",
+        )
+
+        data = parse_yaml_frontmatter(issue_path.read_text())
+        assert data["priority"] == "p0"
+
+    def test_body_replaces_template_body(self, temp_issues_dir):
+        """A caller-supplied body replaces the template body entirely;
+        frontmatter (id, dates, type) stays tool-owned."""
+        issue_path = create_issue(
+            template_name="bug_report",
+            title="Full body bug",
+            issues_dir=temp_issues_dir,
+            body="## Summary\nCustom body.\n\n## Analysis\nDeep dive.\n",
+        )
+
+        content = issue_path.read_text()
+        data = parse_yaml_frontmatter(content)
+        assert data["id"] == "BUG-001"
+        assert data["type"] == "BUG"
+        assert "## Analysis" in content
+        assert "<!--" not in content
+
+    def test_body_with_frontmatter_rejected(self, temp_issues_dir):
+        """Bodies must not smuggle in their own frontmatter — fail fast."""
+        with pytest.raises(IssueCreationError, match="frontmatter"):
+            create_issue(
+                template_name="bug_report",
+                title="Sneaky",
+                issues_dir=temp_issues_dir,
+                body="---\nid: FAKE-999\n---\nbody",
+            )
+
+    def test_description_and_body_are_exclusive(self, temp_issues_dir):
+        """description and body cannot both be given — ambiguous intent."""
+        with pytest.raises(IssueCreationError):
+            create_issue(
+                template_name="bug_report",
+                title="Ambiguous",
+                issues_dir=temp_issues_dir,
+                description="summary",
+                body="## Summary\nbody",
+            )
+
+    def test_title_with_quotes_round_trips(self, temp_issues_dir):
+        """Regression: quoted titles used to gain escape backslashes."""
+        title = 'Fix "quoted" crash'
+        issue_path = create_issue(
+            template_name="bug_report",
+            title=title,
+            issues_dir=temp_issues_dir,
+            priority="p1",
+        )
+
+        data = parse_yaml_frontmatter(issue_path.read_text())
+        assert data["title"] == title
+
+    def test_title_with_newline_rejected(self, temp_issues_dir):
+        """Multi-line titles would corrupt frontmatter — fail fast."""
+        with pytest.raises(IssueCreationError):
+            create_issue(
+                template_name="bug_report",
+                title="line1\nline2",
+                issues_dir=temp_issues_dir,
+            )

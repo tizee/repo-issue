@@ -15,6 +15,20 @@ _FRONTMATTER_PATTERN = re.compile(
 )
 
 
+def _unescape_double_quoted(value: str) -> str:
+    """Reverse the escaping applied when dumping double-quoted values."""
+    return value.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _escape_double_quoted(value: str) -> str:
+    """Escape a value for inclusion inside YAML double quotes.
+
+    Must stay symmetric with _unescape_double_quoted so that any number of
+    parse/dump cycles is the identity.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def _parse_yaml_block(yaml_text: str) -> dict[str, Any]:
     """Parse a block of simple YAML into a dict.
 
@@ -63,12 +77,9 @@ def _parse_yaml_block(yaml_text: str) -> dict[str, Any]:
                 result[key] = [
                     item.strip().strip('"').strip("'") for item in items if item.strip()
                 ]
-            elif (
-                value.startswith('"')
-                and value.endswith('"')
-                or value.startswith("'")
-                and value.endswith("'")
-            ):
+            elif value.startswith('"') and value.endswith('"'):
+                result[key] = _unescape_double_quoted(value[1:-1])
+            elif value.startswith("'") and value.endswith("'"):
                 result[key] = value[1:-1]
             else:
                 result[key] = value
@@ -112,6 +123,18 @@ def split_frontmatter(content: str) -> tuple[dict[str, Any] | None, str]:
     return _parse_yaml_block(yaml_text), body
 
 
+def split_frontmatter_raw(content: str) -> tuple[str | None, str]:
+    """Split content into the raw frontmatter block (including --- markers)
+    and the body text, without parsing.
+
+    Returns (None, original_content) if no frontmatter found.
+    """
+    match = _FRONTMATTER_PATTERN.match(content)
+    if not match:
+        return None, content
+    return match.group(0), content[match.end() :]
+
+
 def _needs_quoting(value: str) -> bool:
     """Check if a string value needs to be quoted in YAML."""
     # Quote if contains special characters, starts/ends with spaces, or is empty
@@ -129,6 +152,13 @@ def _needs_quoting(value: str) -> bool:
     return bool(re.match(r"^\d+$", value))
 
 
+def _format_scalar(value: str) -> str:
+    """Format a string value as a YAML scalar, quoting when needed."""
+    if _needs_quoting(value):
+        return f'"{_escape_double_quoted(value)}"'
+    return value
+
+
 def dump_yaml_frontmatter(data: dict[str, Any]) -> str:
     """Dump frontmatter dictionary to YAML format.
 
@@ -140,16 +170,10 @@ def dump_yaml_frontmatter(data: dict[str, Any]) -> str:
     for key, value in data.items():
         if isinstance(value, list):
             # Format list inline
-            items = [f'"{item}"' for item in value]
+            items = [f'"{_escape_double_quoted(str(item))}"' for item in value]
             lines.append(f"{key}: [{', '.join(items)}]")
         elif isinstance(value, str):
-            if _needs_quoting(value):
-                # Escape quotes in strings
-                escaped = value.replace('"', '\\"')
-                lines.append(f'{key}: "{escaped}"')
-            else:
-                # Unquoted simple string
-                lines.append(f"{key}: {value}")
+            lines.append(f"{key}: {_format_scalar(value)}")
         else:
             # Other values as-is
             lines.append(f"{key}: {value}")
@@ -158,3 +182,44 @@ def dump_yaml_frontmatter(data: dict[str, Any]) -> str:
     lines.append("")  # Trailing newline
 
     return "\n".join(lines)
+
+
+def set_frontmatter_field(content: str, key: str, value: str | None) -> str:
+    """Set, replace, or remove a single frontmatter field via line edit.
+
+    Unlike a parse/dump round-trip, this touches only the target line, so
+    fields the simple parser cannot model (comments, exotic values) survive
+    byte-for-byte.
+
+    Args:
+        content: Full file content starting with a frontmatter block.
+        key: Frontmatter key to set.
+        value: New value; None removes the field.
+
+    Raises:
+        ValueError: If content has no frontmatter block.
+    """
+    match = _FRONTMATTER_PATTERN.match(content)
+    if not match:
+        raise ValueError("content has no YAML frontmatter block")
+
+    fm_text = match.group(1)
+    body = content[match.end() :]
+
+    lines = fm_text.split("\n") if fm_text else []
+    key_prefix = f"{key}:"
+    new_lines: list[str] = []
+    replaced = False
+    for line in lines:
+        if line.startswith(key_prefix):
+            if value is not None and not replaced:
+                new_lines.append(f"{key}: {_format_scalar(value)}")
+            replaced = True
+            continue
+        new_lines.append(line)
+
+    if not replaced and value is not None:
+        new_lines.append(f"{key}: {_format_scalar(value)}")
+
+    fm_block = "---\n" + "\n".join(new_lines) + ("\n" if new_lines else "") + "---\n"
+    return fm_block + body

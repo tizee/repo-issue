@@ -197,6 +197,57 @@ class TestUpdateIssueStatus:
 
         assert "not found" in str(exc_info.value).lower()
 
+    def test_update_preserves_exotic_frontmatter(self, temp_issues_dir):
+        """Fields the built-in parser cannot model survive a status update.
+
+        update only needs to touch status/resolved_date; everything else in
+        the frontmatter (custom fields, unusual values) must pass through
+        byte-for-byte.
+        """
+        issue_path = temp_issues_dir / "active" / "BUG-020.md"
+        issue_path.write_text("""---
+id: BUG-020
+title: "Complex: ticket [with] #special chars"
+created: 2026-02-03
+status: open
+author: test
+custom_metric: 42.5
+owner_chain: alice -> bob
+---
+
+## Summary
+Body.
+""")
+
+        target_path = update_issue_status(temp_issues_dir, "BUG-020", "in_progress")
+
+        content = target_path.read_text()
+        assert 'title: "Complex: ticket [with] #special chars"' in content
+        assert "custom_metric: 42.5" in content
+        assert "owner_chain: alice -> bob" in content
+        assert "status: in_progress" in content
+
+    def test_repeated_updates_do_not_corrupt_quoted_title(self, temp_issues_dir):
+        """Regression: quoted titles used to gain backslashes on every update."""
+        issue_path = temp_issues_dir / "active" / "BUG-021.md"
+        issue_path.write_text("""---
+id: BUG-021
+title: "Title with \\"quotes\\" inside"
+status: open
+---
+
+Body.
+""")
+
+        update_issue_status(temp_issues_dir, "BUG-021", "in_progress")
+        update_issue_status(temp_issues_dir, "BUG-021", "open")
+        path = update_issue_status(temp_issues_dir, "BUG-021", "in_progress")
+
+        content = path.read_text()
+        assert "\\\\" not in content, "backslashes must not accumulate"
+        frontmatter, _ = split_frontmatter(content)
+        assert frontmatter["title"] == 'Title with "quotes" inside'
+
     def test_update_preserves_body_content(self, temp_issues_dir):
         """Test that body content is preserved during status update."""
         issue_path = temp_issues_dir / "active" / "BUG-010.md"
