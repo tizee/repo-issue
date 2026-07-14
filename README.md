@@ -37,6 +37,7 @@ issue init                            # Scaffold issues/ in the current repo
 issue list                            # List active issues
 issue list bug open                   # Filter by type and status
 issue list priority:p0                # Filter by priority
+issue list --sort id                  # Sort by ID (default: priority)
 issue list --all --json               # All issues as JSON
 issue create bug "Fix crash" -p p0    # Create issue
 issue update BUG-001 resolved         # Update status (moves file)

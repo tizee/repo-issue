@@ -484,7 +484,7 @@ class TestFormatOutput:
         assert pos_048 < pos_093 < pos_100 < pos_121
 
     def test_sorts_issues_across_different_statuses(self):
-        """Test that issues are sorted by status first, then by numeric ID."""
+        """--sort status groups by status first, then by numeric ID."""
         issues = [
             {
                 "id": "FEAT-100",
@@ -515,7 +515,7 @@ class TestFormatOutput:
                 "labels": [],
             },
         ]
-        output = format_output(issues, no_color=True)
+        output = format_output(issues, no_color=True, sort_by="status")
 
         pos_open_093 = output.find("Open 93")
         pos_open_121 = output.find("Open 121")

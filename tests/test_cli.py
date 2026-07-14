@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 
 from issue_tracker.cli import (
     dispatch_command,
+    format_output,
     main,
     parse_args,
 )
@@ -299,6 +301,69 @@ class TestListCommand:
         captured = capsys.readouterr()
         assert "bug" in captured.out
         assert "enhancement" in captured.out
+
+
+class TestListOrdering:
+    """Tests for the ordering of issues in human-readable list output."""
+
+    def _ids_in_order(self, output: str, prefix: str) -> list[int]:
+        """Return the numeric IDs for a given prefix in the order they appear."""
+        return [int(m) for m in re.findall(rf"#{prefix}-(\d+)", output)]
+
+    def _feat(self, num: int, priority: str, status: str = "open") -> dict:
+        return {
+            "id": f"FEAT-{num:03d}",
+            "type": "FEAT",
+            "status": status,
+            "priority": priority,
+            "title": "t",
+        }
+
+    def test_default_sorts_by_priority_then_id(self):
+        """Default: higher priority first, ID ascending as tie-breaker."""
+        issues = [
+            self._feat(200, "p1"),
+            self._feat(7, "p3"),
+            self._feat(55, "p2"),
+            self._feat(132, "p3"),
+            self._feat(40, "p1"),
+        ]
+        output = format_output(issues, no_color=True)
+        # p1: 40, 200 -> p2: 55 -> p3: 7, 132
+        assert self._ids_in_order(output, "FEAT") == [40, 200, 55, 7, 132]
+
+    def test_sort_id_gives_ascending_ids(self):
+        """--sort id ignores priority and reads as a clean ascending list."""
+        issues = [
+            self._feat(200, "p1"),
+            self._feat(7, "p3"),
+            self._feat(55, "p2"),
+            self._feat(132, "p3"),
+        ]
+        output = format_output(issues, no_color=True, sort_by="id")
+        assert self._ids_in_order(output, "FEAT") == [7, 55, 132, 200]
+
+    def test_sort_status_groups_actionable_first(self):
+        """--sort status puts open/in_progress before resolved."""
+        issues = [
+            self._feat(50, "p1", status="resolved"),
+            self._feat(10, "p2", status="open"),
+            self._feat(30, "p2", status="in_progress"),
+        ]
+        output = format_output(issues, no_color=True, sort_by="status")
+        assert self._ids_in_order(output, "FEAT") == [10, 30, 50]
+
+    def test_list_command_accepts_sort_flag(self, sample_active_issues, capsys):
+        """The list command exposes --sort end-to-end."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.argv", ["issue", "list", "--sort", "id"]),
+        ):
+            main()
+        captured = capsys.readouterr()
+        assert "BUG-001" in captured.out
 
 
 class TestCreateCommand:

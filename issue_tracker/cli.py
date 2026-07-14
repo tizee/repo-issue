@@ -218,6 +218,16 @@ Examples:
         dest="json_output",
         help="Output as JSON (machine-readable)",
     )
+    list_parser.add_argument(
+        "--sort",
+        choices=["priority", "id", "status"],
+        default=DEFAULT_SORT,
+        help=(
+            "Sort order within each type group: "
+            "priority (default: priority then ID), id (ID ascending), "
+            "status (status then priority then ID)"
+        ),
+    )
 
     # --- create ---
     create_parser = subparsers.add_parser(
@@ -424,6 +434,12 @@ managed by the tool and omitted). Typical agent workflow:
         dest="json_output",
         help="Output matching issues as JSON array",
     )
+    search_parser.add_argument(
+        "--sort",
+        choices=["priority", "id", "status"],
+        default=DEFAULT_SORT,
+        help="Sort order for results (default: priority)",
+    )
 
     # --- stats ---
     stats_parser = subparsers.add_parser(
@@ -505,16 +521,31 @@ def _extract_issue_number(issue_id: str) -> int:
     return int(match.group(1)) if match else 0
 
 
-def _issue_sort_key(issue: dict[str, Any]) -> tuple[int, int, int]:
-    """Sort key: priority first, then status, then numeric ID."""
-    priority = issue.get("priority", "p2")
-    status = issue.get("status", "")
-    issue_id = issue.get("id", "")
-    return (
-        _PRIORITY_ORDER.get(priority, 99),
-        _STATUS_ORDER.get(status, 99),
-        _extract_issue_number(issue_id),
-    )
+def _priority_rank(issue: dict[str, Any]) -> int:
+    return _PRIORITY_ORDER.get(issue.get("priority", "p2"), 99)
+
+
+def _status_rank(issue: dict[str, Any]) -> int:
+    return _STATUS_ORDER.get(issue.get("status", ""), 99)
+
+
+# Composite sort keys. Each returns a tuple compared lexicographically.
+# "priority" is the default: importance first, ID ascending as the tie-breaker.
+_SORT_KEYS = {
+    "priority": lambda i: (_priority_rank(i), _extract_issue_number(i.get("id", ""))),
+    "id": lambda i: (_extract_issue_number(i.get("id", "")),),
+    "status": lambda i: (
+        _status_rank(i),
+        _priority_rank(i),
+        _extract_issue_number(i.get("id", "")),
+    ),
+}
+DEFAULT_SORT = "priority"
+
+
+def _issue_sort_key(sort_by: str = DEFAULT_SORT):
+    """Return the sort-key function for the given sort mode."""
+    return _SORT_KEYS.get(sort_by, _SORT_KEYS[DEFAULT_SORT])
 
 
 def issue_matches_filters(issue: dict[str, Any], filters: list[str]) -> bool:
@@ -608,6 +639,7 @@ def group_issues_by_type(
 def format_output(
     issues: list[dict[str, Any]],
     no_color: bool = False,
+    sort_by: str = DEFAULT_SORT,
 ) -> str:
     """Format issues for human-readable display."""
     if not issues:
@@ -616,8 +648,9 @@ def format_output(
     colors = get_colors(no_color)
     by_type = group_issues_by_type(issues)
 
+    sort_key = _issue_sort_key(sort_by)
     for issue_type in by_type:
-        by_type[issue_type].sort(key=_issue_sort_key)
+        by_type[issue_type].sort(key=sort_key)
 
     lines = []
     for issue_type in ["BUG", "FEAT", "UI"]:
@@ -732,7 +765,12 @@ def cmd_list(args: argparse.Namespace, issues_dir: Path) -> int:
     if getattr(args, "json_output", False):
         print(format_issues_json(issues))
     else:
-        print(format_output(issues, no_color=should_disable_color()))
+        sort_by = getattr(args, "sort", DEFAULT_SORT)
+        print(
+            format_output(
+                issues, no_color=should_disable_color(), sort_by=sort_by
+            )
+        )
     return 0
 
 
@@ -931,9 +969,7 @@ def cmd_search(args: argparse.Namespace, issues_dir: Path) -> int:
 
     issues = load_issues(issues_dir, include_resolved=include_resolved)
     results = [i for i in issues if query_lower in i["_content"].lower()]
-    results.sort(key=_issue_sort_key)
-
-    results.sort(key=_issue_sort_key)
+    results.sort(key=_issue_sort_key(getattr(args, "sort", DEFAULT_SORT)))
 
     # JSON output
     if getattr(args, "json_output", False):

@@ -48,9 +48,10 @@ with `mv` is fine; IDs are preserved and the allocator skips taken numbers.)
 
 ```bash
 issue init                            # Scaffold issues/ in current directory
-issue list                            # Active issues (sorted by priority)
+issue list                            # Active issues (default sort: priority then ID)
 issue list bug open                   # Filter: type + status shorthand
 issue list priority:p0 label:render   # Filter: explicit key:value
+issue list --sort id                  # Sort: priority (default) | id | status
 issue list --all --json               # All issues (active+resolved) as JSON
 issue list --labels                   # All labels with counts
 issue create <type> "<title>"         # type: bug | feat | ui
