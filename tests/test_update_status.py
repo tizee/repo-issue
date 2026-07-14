@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from issue_tracker.update_status import IssueUpdateError, update_issue_status
+from issue_tracker.update_status import (
+    IssueUpdateError,
+    add_issue_note,
+    update_issue_status,
+)
 from issue_tracker.yaml_utils import dump_yaml_frontmatter, split_frontmatter
 
 
@@ -248,6 +252,58 @@ Body.
         frontmatter, _ = split_frontmatter(content)
         assert frontmatter["title"] == 'Title with "quotes" inside'
 
+    def test_note_appended_to_body_on_update(self, temp_issues_dir):
+        """A note passed with the update is appended as a dated section.
+
+        This is the core pain point: agents can record a resolution note in
+        the same call that flips the status, instead of editing the file by
+        hand first.
+        """
+        self.create_test_issue(temp_issues_dir, "BUG-030", "in_progress")
+
+        target_path = update_issue_status(
+            temp_issues_dir,
+            "BUG-030",
+            "resolved",
+            note="Fixed by clamping the index in render().",
+        )
+
+        content = target_path.read_text()
+        frontmatter, body = split_frontmatter(content)
+        assert frontmatter["status"] == "resolved"
+        # Original body survives
+        assert "## Summary" in content
+        assert "Test content" in content
+        # Note section appended with a date heading and the note text
+        assert "## Note" in body
+        assert "Fixed by clamping the index in render()." in body
+
+    def test_note_none_leaves_body_untouched(self, temp_issues_dir):
+        """Without a note, the body is byte-for-byte unchanged apart from
+        frontmatter edits (no stray Note heading)."""
+        self.create_test_issue(temp_issues_dir, "BUG-031", "open")
+
+        target_path = update_issue_status(temp_issues_dir, "BUG-031", "in_progress")
+
+        content = target_path.read_text()
+        assert "## Note" not in content
+
+    def test_multiple_notes_accumulate(self, temp_issues_dir):
+        """Notes from successive updates stack; earlier notes are preserved."""
+        self.create_test_issue(temp_issues_dir, "BUG-032", "open")
+
+        update_issue_status(
+            temp_issues_dir, "BUG-032", "in_progress", note="Started investigating."
+        )
+        target_path = update_issue_status(
+            temp_issues_dir, "BUG-032", "resolved", note="Root cause found and fixed."
+        )
+
+        content = target_path.read_text()
+        assert "Started investigating." in content
+        assert "Root cause found and fixed." in content
+        assert content.count("## Note") == 2
+
     def test_update_preserves_body_content(self, temp_issues_dir):
         """Test that body content is preserved during status update."""
         issue_path = temp_issues_dir / "active" / "BUG-010.md"
@@ -278,3 +334,52 @@ It should work.
         assert "Original summary with details." in content
         assert "## Steps to Reproduce" in content
         assert "## Expected Behavior" in content
+
+
+class TestAddIssueNote:
+    """Tests for appending a note without changing status."""
+
+    def _make(self, issues_dir: Path, issue_id: str, status: str, active: bool = True):
+        subdir = "active" if active else "resolved"
+        path = issues_dir / subdir / f"{issue_id}.md"
+        fm = {"id": issue_id, "title": f"Test {issue_id}", "status": status}
+        _write_issue(path, fm, "## Summary\nOriginal body.")
+        return path
+
+    def test_note_appended_without_status_change(self, temp_issues_dir):
+        """add_issue_note records a note but leaves status/location intact."""
+        self._make(temp_issues_dir, "BUG-040", "in_progress")
+
+        path = add_issue_note(temp_issues_dir, "BUG-040", "Progress: found the bug.")
+
+        # Stays in active, status unchanged
+        assert path.parent.name == "active"
+        content = path.read_text()
+        frontmatter, body = split_frontmatter(content)
+        assert frontmatter["status"] == "in_progress"
+        assert "## Note" in body
+        assert "Progress: found the bug." in body
+        assert "Original body." in body
+
+    def test_note_on_resolved_issue_stays_resolved(self, temp_issues_dir):
+        """Adding a note to a resolved ticket does not move it back to active."""
+        self._make(temp_issues_dir, "BUG-041", "resolved", active=False)
+
+        path = add_issue_note(temp_issues_dir, "BUG-041", "Follow-up observation.")
+
+        assert path.parent.name == "resolved"
+        assert "Follow-up observation." in path.read_text()
+
+    def test_empty_note_rejected(self, temp_issues_dir):
+        """An empty/whitespace note is an error, not a no-op write."""
+        self._make(temp_issues_dir, "BUG-042", "open")
+
+        with pytest.raises(IssueUpdateError):
+            add_issue_note(temp_issues_dir, "BUG-042", "   ")
+
+    def test_note_on_missing_issue_raises(self, temp_issues_dir):
+        """Noting a non-existent issue raises with a helpful message."""
+        with pytest.raises(IssueUpdateError) as exc_info:
+            add_issue_note(temp_issues_dir, "BUG-999", "note")
+
+        assert "not found" in str(exc_info.value).lower()

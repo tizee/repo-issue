@@ -59,6 +59,8 @@ issue create bug "Crash on save" --description-file notes.md
 issue template bug                    # Print fillable body skeleton
 issue create bug "Crash on save" --body-file body.md --json
 issue update BUG-001 in_progress      # open|in_progress|resolved|cancelled
+issue update BUG-001 resolved --note "Fixed in abc123"   # status + note in one call
+issue note BUG-001 "Bisecting now"    # Append a dated note, status unchanged
 issue show FEAT-030                   # Full ticket content
 issue show FEAT-030 --json            # Frontmatter + body, as JSON
 issue search "null pointer" --all     # Case-insensitive full-text search
@@ -88,7 +90,7 @@ List filters combine with AND: bare words `bug|feat|ui` match type,
 ## Working with tickets as an agent
 
 **Prefer `--json` everywhere.** All read commands (`list`, `search`, `show`,
-`stats`) and both write commands (`create`, `update`) support `--json`.
+`stats`) and all write commands (`create`, `update`, `note`) support `--json`.
 Write results include the ticket `id` and `file` path for follow-up steps.
 Use plain output only when relaying directly to the user.
 
@@ -123,16 +125,34 @@ Choose the type by intent: `bug` for incorrect behavior, `feat` for new
 capability or enhancement, `ui` for visual/rendering regressions.
 
 **Updating non-status fields** (priority after creation, labels,
-`blocked_by`, body sections): edit the markdown file directly — the CLI
-manages status transitions, ID allocation, and creation-time priority
-(`-p`). `create --json` and `update --json` return the file path; `list`
+`blocked_by`, editing existing body sections): edit the markdown file
+directly — the CLI manages status transitions, ID allocation, and
+creation-time priority (`-p`). To *add* a note to the body, prefer
+`issue note`/`update --note` over a manual edit (see "Recording notes"
+below). `create --json` and `update --json` return the file path; `list`
 and `search` JSON omit it, so locate files by convention
 (`issues/{active,resolved}/<ID>.md`).
 
+**Recording notes.** To document progress or a resolution, use the CLI
+instead of hand-editing the ticket file. A note is appended to the body as a
+dated `## Note (YYYY-MM-DD)` section; frontmatter and existing content stay
+untouched, and successive notes stack into a chronological log.
+
+```bash
+issue update BUG-001 resolved --note "Fixed by clamping the index"  # status + note
+issue update BUG-001 resolved --note-file /tmp/resolution.md        # note from file
+issue note BUG-001 "Reproduced locally; bisecting the retry loop"   # no status change
+git log -1 --format=%B | issue note BUG-001 -                       # note from stdin
+```
+
+`--note`/`--note-file` (on `update`) and the `note` command all accept `-`
+for stdin — use it for multi-line notes to avoid shell-quoting pitfalls,
+exactly as with `create -d -`.
+
 **Resolving work**: when you fix something tracked by a ticket, ask or
-confirm before running `issue update <ID> resolved`. Consider appending a
-short resolution note to the ticket body first so the resolved ticket
-documents what was done.
+confirm before running `issue update <ID> resolved`. Attach the resolution
+note in the same call — `issue update <ID> resolved --note "..."` — so the
+resolved ticket documents what was done without a separate edit.
 
 **Dependencies**: `blocked_by: ["FEAT-002"]` in frontmatter marks blockers.
 `issue stats` lists blocked issues. There is no automatic unblocking — when

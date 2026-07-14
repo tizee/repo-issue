@@ -40,6 +40,8 @@ issue list priority:p0                # Filter by priority
 issue list --all --json               # All issues as JSON
 issue create bug "Fix crash" -p p0    # Create issue
 issue update BUG-001 resolved         # Update status (moves file)
+issue update BUG-001 resolved --note "Fixed in abc123"  # ...and log a note
+issue note BUG-001 "Bisecting now"    # Append a dated note, status unchanged
 issue show FEAT-030                   # Show issue details
 issue show FEAT-030 --json            # Frontmatter + body as JSON
 issue search "null pointer" --all     # Full-text search
@@ -70,6 +72,28 @@ carries its own `---` frontmatter block is rejected.
 
 `--json` on `create` and `update` emits machine-readable results
 (`{"id": ..., "status": ..., "file": ...}`) for scripted workflows.
+
+## Notes
+
+Record progress or a resolution without hand-editing the ticket file. A note
+is appended to the body as a dated `## Note (YYYY-MM-DD)` section; frontmatter
+and existing content are left untouched, and successive notes stack into a
+chronological log.
+
+```bash
+# Attach a note while changing status (one call instead of edit-then-update)
+issue update BUG-001 resolved --note "Fixed by clamping the index"
+issue update BUG-001 resolved --note-file resolution.md
+
+# Log progress without changing status
+issue note BUG-001 "Reproduced locally; bisecting the retry loop"
+issue note BUG-001 --note-file progress.md
+git log -1 --format=%B | issue note BUG-001 -   # note text from stdin
+```
+
+Both `--note`/`--note-file` (on `update`) and the `note` command support `-`
+for stdin, so multi-line notes never hit shell-quoting pitfalls. `update`
+and `note` accept `--json` (result includes `note_added`).
 
 ## Issue lifecycle
 

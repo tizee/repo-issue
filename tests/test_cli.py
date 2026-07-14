@@ -545,6 +545,179 @@ class TestUpdateCommand:
         assert data["status"] == "resolved"
         assert data["file"].endswith("BUG-001.md")
 
+    def test_update_with_note_appends_to_body(self, sample_active_issues, capsys):
+        """--note appends the note text to the ticket body during update."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch(
+                "sys.argv",
+                [
+                    "issue",
+                    "update",
+                    "BUG-001",
+                    "resolved",
+                    "--note",
+                    "Fixed by clamping the index.",
+                ],
+            ),
+        ):
+            assert main() == 0
+
+        content = (sample_active_issues / "resolved" / "BUG-001.md").read_text()
+        assert "Fixed by clamping the index." in content
+        assert "## Note" in content
+
+    def test_update_with_note_file(self, sample_active_issues, tmp_path, capsys):
+        """--note-file reads the note from a file and appends it."""
+        note_file = tmp_path / "note.md"
+        note_file.write_text("Resolution details from a file.")
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch(
+                "sys.argv",
+                [
+                    "issue",
+                    "update",
+                    "BUG-001",
+                    "resolved",
+                    "--note-file",
+                    str(note_file),
+                ],
+            ),
+        ):
+            assert main() == 0
+
+        content = (sample_active_issues / "resolved" / "BUG-001.md").read_text()
+        assert "Resolution details from a file." in content
+
+    def test_update_note_from_stdin(self, sample_active_issues, capsys):
+        """--note - reads the note text from stdin."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.stdin", io.StringIO("Piped resolution note.")),
+            patch(
+                "sys.argv",
+                ["issue", "update", "BUG-001", "resolved", "--note", "-"],
+            ),
+        ):
+            assert main() == 0
+
+        content = (sample_active_issues / "resolved" / "BUG-001.md").read_text()
+        assert "Piped resolution note." in content
+
+    def test_update_note_sources_are_mutually_exclusive(self, capsys):
+        """--note and --note-file cannot be combined."""
+        with pytest.raises(SystemExit):
+            parse_args(
+                ["update", "BUG-001", "resolved", "--note", "x", "--note-file", "n.md"]
+            )
+
+
+class TestNoteCommand:
+    """Tests for the standalone 'note' command (no status change)."""
+
+    def test_note_appends_without_status_change(self, sample_active_issues, capsys):
+        """`issue note` records a note and keeps the issue where it is."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch(
+                "sys.argv",
+                ["issue", "note", "BUG-001", "Progress update: root cause found."],
+            ),
+        ):
+            assert main() == 0
+
+        # Still active, note present, status untouched
+        active_file = sample_active_issues / "active" / "BUG-001.md"
+        assert active_file.exists()
+        content = active_file.read_text()
+        assert "Progress update: root cause found." in content
+        assert "## Note" in content
+
+    def test_note_from_file(self, sample_active_issues, tmp_path, capsys):
+        """`issue note --note-file` reads the note from a file."""
+        note_file = tmp_path / "n.md"
+        note_file.write_text("Detailed note from file.")
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch(
+                "sys.argv",
+                ["issue", "note", "BUG-001", "--note-file", str(note_file)],
+            ),
+        ):
+            assert main() == 0
+
+        content = (sample_active_issues / "active" / "BUG-001.md").read_text()
+        assert "Detailed note from file." in content
+
+    def test_note_from_stdin(self, sample_active_issues, capsys):
+        """`issue note BUG-001 -` reads the note from stdin."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.stdin", io.StringIO("Piped standalone note.")),
+            patch("sys.argv", ["issue", "note", "BUG-001", "-"]),
+        ):
+            assert main() == 0
+
+        content = (sample_active_issues / "active" / "BUG-001.md").read_text()
+        assert "Piped standalone note." in content
+
+    def test_note_json_output(self, sample_active_issues, capsys):
+        """`issue note --json` emits a machine-readable result."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch(
+                "sys.argv",
+                ["issue", "note", "BUG-001", "A note", "--json"],
+            ),
+        ):
+            assert main() == 0
+
+        data = json.loads(capsys.readouterr().out)
+        assert data["id"] == "BUG-001"
+        assert data["file"].endswith("BUG-001.md")
+
+    def test_note_missing_text_errors(self, sample_active_issues, capsys):
+        """`issue note` with no text and no --note-file is an operation error."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.argv", ["issue", "note", "BUG-001"]),
+        ):
+            assert main() == 1
+
+    def test_note_missing_issue_errors(self, sample_active_issues, capsys):
+        """Noting a non-existent issue returns exit code 1."""
+        with (
+            patch(
+                "issue_tracker.cli.find_issues_dir", return_value=sample_active_issues
+            ),
+            patch("sys.argv", ["issue", "note", "NOPE-999", "text"]),
+        ):
+            assert main() == 1
+
+    def test_note_conflicting_sources_are_usage_error(self, capsys):
+        """Text and --note-file together is a usage error (exit 2), matching
+        the mutual-exclusion behavior of `update --note/--note-file`."""
+        with pytest.raises(SystemExit) as exc_info:
+            parse_args(["note", "BUG-001", "some text", "--note-file", "n.md"])
+        assert exc_info.value.code == 2
+
 
 class TestShowCommand:
     """Tests for show command."""

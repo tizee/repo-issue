@@ -4,7 +4,8 @@ Usage:
     issue init
     issue list [filters...] [--resolved] [--all] [--json] [--labels]
     issue create <type> <title> [options]
-    issue update <issue-id> <status> [--json]
+    issue update <issue-id> <status> [--note TEXT | --note-file PATH] [--json]
+    issue note <issue-id> [text] [--note-file PATH] [--json]
     issue show <issue-id> [--json]
     issue template <type>
     issue search <query>
@@ -16,6 +17,7 @@ Commands:
     list        List and filter issue tickets
     create      Create a new issue from template
     update      Update issue status and manage lifecycle
+    note        Append a dated note without changing status
     show        Display full issue details
     template    Print a template body skeleton for filling in
     search      Full-text search across all issues
@@ -41,6 +43,8 @@ Examples:
     issue template bug > body.md        # Get skeleton, fill it in, then:
     issue create bug "Crash" --body-file body.md
     issue update BUG-001 resolved       # Mark as resolved
+    issue update BUG-001 resolved --note "Fixed in commit abc123"
+    issue update BUG-001 resolved --note-file resolution.md
     issue show FEAT-030                 # Show issue details
     issue show FEAT-030 --json          # Show as JSON (frontmatter + body)
     issue search "null pointer"         # Full-text search
@@ -63,7 +67,7 @@ from typing import Any
 from .create_issue import IssueCreationError, create_issue
 from .discovery import IssuesDirNotFoundError, find_issues_dir
 from .init import IssuesInitError, init_issues_dir
-from .update_status import IssueUpdateError, update_issue_status
+from .update_status import IssueUpdateError, add_issue_note, update_issue_status
 from .yaml_utils import parse_yaml_frontmatter, split_frontmatter_raw
 
 
@@ -115,6 +119,7 @@ Commands:
   list        List and filter issues (active by default)
   create      Create a new issue from template
   update      Update issue status (open/in_progress/resolved/cancelled)
+  note        Append a dated note without changing status
   show        Display full issue content
   template    Print a template body skeleton (fill in, pass to create --body-file)
   search      Full-text search across all issues
@@ -125,7 +130,8 @@ JSON output (--json):
   list        Array of issue objects
   list --labels  Object with label names as keys, counts as values
   create      Object with id, type, status, priority, file
-  update      Object with id, status, file
+  update      Object with id, status, file, note_added
+  note        Object with id, file, note_added
   show        Object with frontmatter fields plus body
   search      Array of matching issue objects
   stats       Object with total, active, resolved, by_type, by_status, by_priority
@@ -155,6 +161,8 @@ Examples:
   issue template bug > body.md        Print skeleton, fill it, then:
   issue create bug "Crash" --body-file body.md --json
   issue update BUG-001 resolved       Resolve issue
+  issue update BUG-001 resolved --note "Fixed in abc123"  Resolve with a note
+  issue note BUG-001 "Bisecting now"  Log progress without changing status
   issue search "null pointer"         Search all issues
   issue search "crash" --json         Search results as JSON
   issue stats                         Show counts
@@ -296,11 +304,62 @@ Examples:
         choices=["open", "in_progress", "resolved", "cancelled"],
         help="New status for the issue",
     )
+    note_group = update_parser.add_mutually_exclusive_group()
+    note_group.add_argument(
+        "--note",
+        default=None,
+        help="Append a dated note to the ticket body; use '-' to read stdin",
+    )
+    note_group.add_argument(
+        "--note-file",
+        default=None,
+        metavar="PATH",
+        help="Read the note from a file; use '-' to read from stdin",
+    )
     update_parser.add_argument(
         "--json",
         action="store_true",
         dest="json_output",
         help="Output update result as JSON",
+    )
+
+    # --- note ---
+    note_parser = subparsers.add_parser(
+        "note",
+        help="Append a dated note to an issue without changing its status",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Records a dated '## Note' section in the ticket body, leaving status and
+file location untouched. Use it for progress updates between status changes.
+
+Examples:
+  issue note BUG-001 "Reproduced locally; bisecting now"
+  issue note BUG-001 --note-file progress.md
+  git log -1 --format=%B | issue note BUG-001 -
+""",
+    )
+    note_parser.add_argument(
+        "issue_id",
+        help="Issue ID (e.g., BUG-001)",
+    )
+    note_source = note_parser.add_mutually_exclusive_group()
+    note_source.add_argument(
+        "text",
+        nargs="?",
+        default=None,
+        help="Note text; use '-' to read from stdin (or use --note-file)",
+    )
+    note_source.add_argument(
+        "--note-file",
+        default=None,
+        metavar="PATH",
+        help="Read the note from a file; use '-' to read from stdin",
+    )
+    note_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output result as JSON",
     )
 
     # --- show ---
@@ -763,7 +822,15 @@ def cmd_template(args: argparse.Namespace, issues_dir: Path) -> int:
 def cmd_update(args: argparse.Namespace, issues_dir: Path) -> int:
     """Handle update command."""
     try:
-        target_path = update_issue_status(issues_dir, args.issue_id, args.status)
+        note = None
+        if args.note is not None:
+            note = _read_text_arg(args.note)
+        elif args.note_file is not None:
+            note = _read_file_arg(args.note_file)
+
+        target_path = update_issue_status(
+            issues_dir, args.issue_id, args.status, note=note
+        )
         if getattr(args, "json_output", False):
             print(
                 json.dumps(
@@ -771,6 +838,7 @@ def cmd_update(args: argparse.Namespace, issues_dir: Path) -> int:
                         "id": args.issue_id,
                         "status": args.status,
                         "file": str(target_path),
+                        "note_added": bool(note and note.strip()),
                     },
                     indent=2,
                 )
@@ -778,8 +846,46 @@ def cmd_update(args: argparse.Namespace, issues_dir: Path) -> int:
         else:
             print(f"Updated: {args.issue_id} -> {args.status}")
             print(f"File: {target_path}")
+            if note and note.strip():
+                print("Note appended.")
         return 0
-    except IssueUpdateError as e:
+    except (IssueUpdateError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_note(args: argparse.Namespace, issues_dir: Path) -> int:
+    """Handle note command — append a note without changing status."""
+    try:
+        if args.text is not None:
+            note = _read_text_arg(args.text)
+        elif args.note_file is not None:
+            note = _read_file_arg(args.note_file)
+        else:
+            print(
+                "Error: no note provided\n"
+                "  Hint: pass note text, '-' for stdin, or --note-file PATH",
+                file=sys.stderr,
+            )
+            return 1
+
+        target_path = add_issue_note(issues_dir, args.issue_id, note)
+        if getattr(args, "json_output", False):
+            print(
+                json.dumps(
+                    {
+                        "id": args.issue_id,
+                        "file": str(target_path),
+                        "note_added": True,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            print(f"Note added: {args.issue_id}")
+            print(f"File: {target_path}")
+        return 0
+    except (IssueUpdateError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
@@ -1021,6 +1127,7 @@ def dispatch_command(args: argparse.Namespace, issues_dir: Path) -> int:
         "list": cmd_list,
         "create": cmd_create,
         "update": cmd_update,
+        "note": cmd_note,
         "show": cmd_show,
         "template": cmd_template,
         "search": cmd_search,
@@ -1040,7 +1147,7 @@ def main() -> int:
         print(
             "Error: No command specified.\n"
             "  Usage: issue <command> [args...]\n"
-            "  Commands: init, list, create, update, show, template, search, "
+            "  Commands: init, list, create, update, note, show, template, search, "
             "stats, reconcile\n"
             "  Run 'issue --help' for full usage.",
             file=sys.stderr,
