@@ -3,7 +3,7 @@
 # Install (or upgrade) the globally available `issue` CLI from this source tree.
 # `--force` makes it idempotent: rerun after any code change to pick it up.
 install:
-	uv tool install --force --from . repo-issue
+	uv tool install --force --from . repo-issue --reinstall
 
 # Explicit alias for upgrading an already-installed copy.
 reinstall: install
